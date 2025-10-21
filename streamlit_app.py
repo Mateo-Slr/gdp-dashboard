@@ -1,8 +1,9 @@
 # streamlit_app.py
 # ------------------------------------------------------------
-# ODISSE — visualisations multi-datasets (cartes & visus auto)
+# ODISSE — visualisations multi-datasets (APIs ODISSE + CSV locaux)
 # ------------------------------------------------------------
 import io
+import os
 import time
 import requests
 import pandas as pd
@@ -15,32 +16,64 @@ except Exception:
     px = None  # on gérera plus bas
 
 st.set_page_config(page_title="ODISSE — Multi-cartes", layout="wide")
-st.title("🧬 ODISSE — Couvertures & Grippe (multi-cartes)")
+st.title("🧬 ODISSE — Couvertures & Grippe (multi-sources)")
 
-# ===== 1) LISTE D'ENDPOINTS (ajoute/modifie ici) ==============================
-ODISSE_ENDPOINTS = [
+# ===== 1) DATASETS (APIs limitées à 100 + CSV locaux) ========================
+# kind: "api" ou "csv"
+DATASETS = [
+    # --- APIs ODISSE ---
     {
-        "label": "Couvertures vaccinales — ados & adultes (département)",
-        "url": (
+        "label": "Couvertures vaccinales — ados & adultes (département) [API]",
+        "kind": "api",
+        "path": (
             "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
             "couvertures-vaccinales-des-adolescent-et-adultes-departement/records?limit=100"
         ),
-        # priorité pour choisir la colonne de valeur sur la carte
         "value_pref": ["couverture", "taux", "pct", "pourcent", "value"],
     },
     {
-        "label": "Grippe — passages aux urgences & actes SOS Médecins (département)",
-        "url": (
+        "label": "Grippe — urgences & SOS Médecins (département) [API]",
+        "kind": "api",
+        "path": (
             "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
             "grippe-passages-aux-urgences-et-actes-sos-medecins-departement/records?limit=100"
         ),
-        # priorités possibles selon le schéma du jeu (nombre, taux, incidence…)
         "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
     },
-]
-# ==============================================================================
+    {
+        "label": "Grippe — urgences & SOS Médecins (France) [API]",
+        "kind": "api",
+        "path": (
+            "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
+            "grippe-passages-aux-urgences-et-actes-sos-medecins-france/records?limit=100"
+        ),
+        # dataset national → pas de carte si pas de colonne département
+        "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
+    },
 
-# ===== 2) Utilitaires =========================================================
+    # --- CSV locaux (mets-les dans ./data/) ---
+    {
+        "label": "Couvertures locales 2024 (département) [CSV]",
+        "kind": "csv",
+        "path": "data/couverture-2024.csv",
+        "value_pref": ["couverture", "taux", "pct", "pourcent", "value"],
+    },
+    {
+        "label": "Campagne 2024 (département) [CSV]",
+        "kind": "csv",
+        "path": "data/campagne-2024.csv",
+        "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
+    },
+    {
+        "label": "Doses & actes 2024 (département) [CSV]",
+        "kind": "csv",
+        "path": "data/doses-actes-2024.csv",
+        "value_pref": ["doses", "actes", "nb", "taux", "incidence", "value"],
+    },
+]
+# ============================================================================
+
+# ===== 2) Utilitaires communs ===============================================
 DEP_CANDIDATES = [
     "dep", "code_dep", "departement", "code_departement",
     "code_dpt", "departement_code", "CODDEP", "DEP", "code"
@@ -57,18 +90,23 @@ def _friendly_network_error(e: Exception) -> str:
     msg = str(e)
     tips = []
     if any(k in msg for k in ["Failed to establish a new connection", "Device or resource busy", "Errno 16"]):
-        tips.append("Sortie réseau bloquée : active une External Access Integration pour `odisse.santepubliquefrance.fr:443` et rattache-la à l’app.")
+        tips.append("Sortie réseau bloquée : dans Snowflake, activer une External Access Integration pour `odisse.santepubliquefrance.fr:443` et `raw.githubusercontent.com:443` puis l’attacher à l’app.")
     if "HTTPSConnectionPool" in msg:
-        tips.append("Vérifie le DNS/SSL plateforme et l’URL.")
+        tips.append("Vérifier DNS/SSL plateforme et l’URL.")
     return " ".join(tips) or msg
 
 @st.cache_data(show_spinner=True, ttl=3600)
-def fetch_odisse(url: str) -> pd.DataFrame:
-    """Télécharge l'endpoint ODISSE avec retries + parsers JSON/CSV robustes."""
+def fetch_api(url: str) -> pd.DataFrame:
+    """Télécharge un endpoint ODISSE (retries + JSON/CSV robustes)."""
     s = _requests_session()
     last_exc = None
     for attempt in range(3):
         try:
+            # S’assure que limit=100 est présent (au cas où)
+            if "limit=" not in url:
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}limit=100"
+
             r = s.get(url, timeout=(5, 30))
             r.raise_for_status()
             ct = (r.headers.get("Content-Type") or "").lower()
@@ -92,6 +130,21 @@ def fetch_odisse(url: str) -> pd.DataFrame:
                 raise RuntimeError(_friendly_network_error(e)) from e
             time.sleep(1 + attempt)  # backoff
     raise RuntimeError(_friendly_network_error(last_exc or Exception("Erreur inconnue")))
+
+@st.cache_data(show_spinner=True)
+def fetch_csv(path: str) -> pd.DataFrame:
+    """Charge un CSV local (dans le repo)."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Fichier introuvable : {path} (mets-le dans le repo)")
+
+    # Encodage: on tente utf-8 puis latin-1
+    for enc in ("utf-8", "latin-1"):
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    # Dernier essai sans encodage explicite
+    return pd.read_csv(path)
 
 def norm_dep_code(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
     dep_col = None
@@ -131,7 +184,7 @@ def infer_dates(df: pd.DataFrame) -> pd.DataFrame:
     for c in out.columns:
         if out[c].dtype == object:
             try:
-                parsed = pd.to_datetime(out[c])  # laisse lever si vraiment illisible
+                parsed = pd.to_datetime(out[c])  # lève si illisible → on ignore
                 if pd.api.types.is_datetime64_any_dtype(parsed):
                     out[c] = parsed
             except Exception:
@@ -143,17 +196,14 @@ def pick_numeric(df: pd.DataFrame) -> list[str]:
     pref = [c for c in num_cols if any(k in c.lower()
             for k in ["couverture", "grippe", "covid", "hpv",
                       "meningo", "taux", "ratio", "pourcent", "pct",
-                      "value", "nb", "passages", "actes", "incidence"])]
+                      "value", "nb", "passages", "actes", "incidence", "doses"])]
     return pref if pref else num_cols
 
 def choose_value_col(df: pd.DataFrame, prefs: list[str] | None) -> str | None:
     if prefs:
         for p in prefs:
             for col in df.columns:
-                if col.lower() == p.lower():
-                    return col
-                # match contains
-                if p.lower() in col.lower():
+                if col.lower() == p.lower() or p.lower() in col.lower():
                     return col
     num_cols = pick_numeric(df)
     return num_cols[0] if num_cols else None
@@ -195,7 +245,7 @@ def show_time_series(df: pd.DataFrame, title="Séries temporelles (auto)"):
     if px is None:
         st.info("Plotly non disponible, séries temporelles désactivées.")
         return
-    # choisir time_col
+    # choisir une colonne temporelle
     time_col = None
     for c in DATE_CANDIDATES + YEAR_CANDIDATES:
         if c in df.columns:
@@ -243,12 +293,19 @@ def safe_scatter(df: pd.DataFrame, title: str):
     fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=title)
     st.plotly_chart(fig, width="stretch")
 
-def render_dataset_panel(ep: dict):
-    url = ep["url"]
-    label = ep["label"]
+def load_dataset(ds: dict) -> pd.DataFrame:
+    if ds["kind"] == "api":
+        return fetch_api(ds["path"])
+    elif ds["kind"] == "csv":
+        return fetch_csv(ds["path"])
+    else:
+        raise ValueError(f"Type de dataset inconnu: {ds['kind']}")
+
+def render_dataset_panel(ds: dict):
+    label = ds["label"]
     with st.spinner(f"Chargement — {label}"):
         try:
-            raw = fetch_odisse(url)
+            raw = load_dataset(ds)
         except Exception as e:
             st.error(f"Erreur de chargement pour « {label} » : {e}")
             return
@@ -256,13 +313,11 @@ def render_dataset_panel(ep: dict):
     df, dep_col = norm_dep_code(raw)
     df = infer_dates(df)
 
-    st.caption(f"Source: ODISSE • {label} • Lignes: {len(df):,}")
+    st.caption(f"Source: {('ODISSE API' if ds['kind']=='api' else 'CSV local')} • {label} • Lignes: {len(df):,}")
     st.dataframe(df.head(50), use_container_width=True)
 
-    # Choix de la valeur pour la carte
-    val_col = choose_value_col(df, ep.get("value_pref"))
-
-    # Carte
+    # Carte uniquement si on a une colonne département
+    val_col = choose_value_col(df, ds.get("value_pref"))
     if dep_col and val_col:
         show_choropleth_dep(df, dep_col, val_col, f"{label} — {val_col}")
     else:
@@ -274,21 +329,22 @@ def render_dataset_panel(ep: dict):
 
 # ===== 3) UI — sélection & rendu =============================================
 st.markdown("### 🗺️ Sélectionne les datasets à afficher")
-choices = st.multiselect(
-    "Datasets ODISSE",
-    options=[ep["label"] for ep in ODISSE_ENDPOINTS],
-    default=[ODISSE_ENDPOINTS[0]["label"], ODISSE_ENDPOINTS[1]["label"]],
-)
+options = [ds["label"] for ds in DATASETS]
+default_sel = [ds["label"] for ds in DATASETS]  # tout coché par défaut
+choices = st.multiselect("Datasets", options=options, default=default_sel)
 
 tabs = st.tabs(choices if choices else ["Aucun dataset"])
 if choices:
     for tab, label in zip(tabs, choices):
         with tab:
-            ep = next(ep for ep in ODISSE_ENDPOINTS if ep["label"] == label)
-            render_dataset_panel(ep)
+            ds = next(d for d in DATASETS if d["label"] == label)
+            render_dataset_panel(ds)
 else:
     with tabs[0]:
         st.info("Sélectionne au moins un dataset pour afficher les visuels.")
 
 st.markdown("---")
-
+st.markdown(
+    "💡 Mets tes CSV dans `data/` et ajuste `DATASETS` ci-dessus si tu changes de noms de fichiers. "
+    "Tu peux aussi ajouter d'autres endpoints ODISSE (garde `?limit=100`)."
+)
