@@ -1,2 +1,8 @@
 streamlit
+requests
 pandas
+plotly
+# optionnel pour la carte :
+geopandas
+folium
+statsmodels
