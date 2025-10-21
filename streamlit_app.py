@@ -1,30 +1,46 @@
-# app/app.py
+# streamlit_app.py
 # ------------------------------------------------------------
-# Grippe — visualisation ODISSE (endpoint câblé en dur)
+# ODISSE — visualisations multi-datasets (cartes & visus auto)
 # ------------------------------------------------------------
 import io
-import json
 import time
 import requests
 import pandas as pd
 import streamlit as st
 
-# visus
+# Visus (optionnels si non dispo)
 try:
     import plotly.express as px
 except Exception:
     px = None  # on gérera plus bas
 
-st.set_page_config(page_title="ODISSE — Couvertures vaccinales", layout="wide")
-st.title("🧬 ODISSE — Couvertures vaccinales (ados & adultes)")
+st.set_page_config(page_title="ODISSE — Multi-cartes", layout="wide")
+st.title("🧬 ODISSE — Couvertures & Grippe (multi-cartes)")
 
-# ===== 1) URL API EN DUR =====
-ODISSE_URL = (
-    "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
-    "couvertures-vaccinales-des-adolescent-et-adultes-departement/records?limit=100"
-)
+# ===== 1) LISTE D'ENDPOINTS (ajoute/modifie ici) ==============================
+ODISSE_ENDPOINTS = [
+    {
+        "label": "Couvertures vaccinales — ados & adultes (département)",
+        "url": (
+            "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
+            "couvertures-vaccinales-des-adolescent-et-adultes-departement/records?limit=100"
+        ),
+        # priorité pour choisir la colonne de valeur sur la carte
+        "value_pref": ["couverture", "taux", "pct", "pourcent", "value"],
+    },
+    {
+        "label": "Grippe — passages aux urgences & actes SOS Médecins (département)",
+        "url": (
+            "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
+            "grippe-passages-aux-urgences-et-actes-sos-medecins-departement/records?limit=100"
+        ),
+        # priorités possibles selon le schéma du jeu (nombre, taux, incidence…)
+        "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
+    },
+]
+# ==============================================================================
 
-# ===== 2) Utilitaires =====
+# ===== 2) Utilitaires =========================================================
 DEP_CANDIDATES = [
     "dep", "code_dep", "departement", "code_departement",
     "code_dpt", "departement_code", "CODDEP", "DEP", "code"
@@ -34,27 +50,22 @@ DATE_CANDIDATES = ["date", "Date", "DATE"]
 
 def _requests_session():
     s = requests.Session()
-    s.headers.update({
-        "User-Agent": "streamlit-snowflake-odisse/1.0 (+https://santepubliquefrance.fr)"
-    })
+    s.headers.update({"User-Agent": "streamlit-odisse/1.0"})
     return s
 
 def _friendly_network_error(e: Exception) -> str:
     msg = str(e)
-    # cas typiques dans Snowflake sans EAI
-    hints = []
-    if "Failed to establish a new connection" in msg or "Device or resource busy" in msg or "Errno 16" in msg:
-        hints.append("L’accès réseau sortant est bloqué. Active une **External Access Integration** sur `odisse.santepubliquefrance.fr:443` et rattache-la à l’app Streamlit.")
+    tips = []
+    if any(k in msg for k in ["Failed to establish a new connection", "Device or resource busy", "Errno 16"]):
+        tips.append("Sortie réseau bloquée : active une External Access Integration pour `odisse.santepubliquefrance.fr:443` et rattache-la à l’app.")
     if "HTTPSConnectionPool" in msg:
-        hints.append("Vérifie aussi le DNS/SSL côté plateforme et que l’URL est correcte.")
-    return " ".join(hints) or msg
+        tips.append("Vérifie le DNS/SSL plateforme et l’URL.")
+    return " ".join(tips) or msg
 
 @st.cache_data(show_spinner=True, ttl=3600)
 def fetch_odisse(url: str) -> pd.DataFrame:
     """Télécharge l'endpoint ODISSE avec retries + parsers JSON/CSV robustes."""
     s = _requests_session()
-
-    # retries simples (3 tentatives, backoff 1s, 2s)
     last_exc = None
     for attempt in range(3):
         try:
@@ -70,19 +81,16 @@ def fetch_odisse(url: str) -> pd.DataFrame:
                     return pd.json_normalize(data)
                 return pd.json_normalize(data)
 
-            # fallback CSV si le serveur répond mal son Content-Type
+            # fallback CSV si mauvais content-type
             try:
                 return pd.read_csv(io.BytesIO(r.content))
             except Exception:
                 raise ValueError("Réponse non JSON/CSV. L’API devrait renvoyer du JSON.")
         except Exception as e:
             last_exc = e
-            # dernier essai -> on remonte
             if attempt == 2:
                 raise RuntimeError(_friendly_network_error(e)) from e
             time.sleep(1 + attempt)  # backoff
-
-    # ne devrait pas arriver
     raise RuntimeError(_friendly_network_error(last_exc or Exception("Erreur inconnue")))
 
 def norm_dep_code(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
@@ -97,7 +105,6 @@ def norm_dep_code(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
     out = df.copy()
     out.rename(columns={dep_col: "dep"}, inplace=True)
     out["dep"] = out["dep"].astype(str).str.strip()
-    # Zéro à gauche pour 2 chiffres (hors 2A/2B)
     out["dep"] = out["dep"].apply(
         lambda x: x if x.upper() in ["2A", "2B"]
         else (x.zfill(2) if x.isdigit() and len(x) <= 2 else x)
@@ -113,18 +120,18 @@ def infer_dates(df: pd.DataFrame) -> pd.DataFrame:
                 out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
             except Exception:
                 pass
-    # parse dates “génériques”
+    # parse dates génériques
     for c in DATE_CANDIDATES:
         if c in out.columns:
             try:
-                out[c] = pd.to_datetime(out[c], errors="coerce", utc=False)
+                out[c] = pd.to_datetime(out[c], errors="coerce")
             except Exception:
                 pass
-    # tentative large
+    # tentative large prudente
     for c in out.columns:
         if out[c].dtype == object:
             try:
-                parsed = pd.to_datetime(out[c], errors="ignore")
+                parsed = pd.to_datetime(out[c])  # laisse lever si vraiment illisible
                 if pd.api.types.is_datetime64_any_dtype(parsed):
                     out[c] = parsed
             except Exception:
@@ -134,17 +141,28 @@ def infer_dates(df: pd.DataFrame) -> pd.DataFrame:
 def pick_numeric(df: pd.DataFrame) -> list[str]:
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     pref = [c for c in num_cols if any(k in c.lower()
-            for k in ["couverture", "grippe", "covid", "hpv", "meningo", "taux", "ratio", "pourcent", "pct", "value"])]
+            for k in ["couverture", "grippe", "covid", "hpv",
+                      "meningo", "taux", "ratio", "pourcent", "pct",
+                      "value", "nb", "passages", "actes", "incidence"])]
     return pref if pref else num_cols
+
+def choose_value_col(df: pd.DataFrame, prefs: list[str] | None) -> str | None:
+    if prefs:
+        for p in prefs:
+            for col in df.columns:
+                if col.lower() == p.lower():
+                    return col
+                # match contains
+                if p.lower() in col.lower():
+                    return col
+    num_cols = pick_numeric(df)
+    return num_cols[0] if num_cols else None
 
 def show_choropleth_dep(df: pd.DataFrame, dep_col: str, val_col: str, title="Carte par département"):
     try:
         import geopandas as gpd, folium, json as _json
-    except Exception as e:
+    except Exception:
         st.info("Carte non disponible (geopandas/folium non installés).")
-        return
-    if dep_col is None or val_col is None:
-        st.info("Aucune colonne département/valeur trouvée pour la carte.")
         return
     try:
         geo_url = "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/departements.geojson"
@@ -155,7 +173,9 @@ def show_choropleth_dep(df: pd.DataFrame, dep_col: str, val_col: str, title="Car
             lambda x: x if x.upper() in ["2A", "2B"]
             else (x.zfill(2) if x.isdigit() and len(x) <= 2 else x)
         )
-        merged = gdf_geo.merge(tmp.groupby("dep", as_index=False)["value"].mean(), on="dep", how="left")
+        merged = gdf_geo.merge(
+            tmp.groupby("dep", as_index=False)["value"].mean(), on="dep", how="left"
+        )
         m = folium.Map(location=(46.6, 2.5), zoom_start=5, tiles="cartodbpositron")
         folium.Choropleth(
             geo_data=_json.loads(merged.to_json()),
@@ -171,11 +191,17 @@ def show_choropleth_dep(df: pd.DataFrame, dep_col: str, val_col: str, title="Car
     except Exception as e:
         st.error(f"Carte indisponible : {e}")
 
-def show_time_series(df: pd.DataFrame, time_col: str, y_cols: list[str], title="Séries temporelles"):
+def show_time_series(df: pd.DataFrame, title="Séries temporelles (auto)"):
     if px is None:
         st.info("Plotly non disponible, séries temporelles désactivées.")
         return
-    if time_col not in df.columns or not y_cols:
+    # choisir time_col
+    time_col = None
+    for c in DATE_CANDIDATES + YEAR_CANDIDATES:
+        if c in df.columns:
+            time_col = c
+            break
+    if time_col is None:
         return
     local = df.dropna(subset=[time_col]).copy()
     if not pd.api.types.is_datetime64_any_dtype(local[time_col]):
@@ -192,59 +218,77 @@ def show_time_series(df: pd.DataFrame, time_col: str, y_cols: list[str], title="
     local = local.dropna(subset=[time_col]).sort_values(time_col)
     if local.empty:
         return
+    y_cols = pick_numeric(local)[:3]
+    if not y_cols:
+        return
     fig = px.line(local, x=time_col, y=y_cols, title=title)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
-def safe_scatter(df: pd.DataFrame, x: str, y: str, title: str):
+def safe_scatter(df: pd.DataFrame, title: str):
     if px is None:
         return
-    if x not in df.columns or y not in df.columns:
+    num_cols = pick_numeric(df)
+    if len(num_cols) < 2:
         return
+    x, y = num_cols[0], num_cols[1]
     tmp = df[[x, y]].dropna()
     if tmp.empty:
         return
-    fig = px.scatter(tmp, x=x, y=y, trendline="ols", title=title)
-    st.plotly_chart(fig, use_container_width=True)
+    # trendline seulement si statsmodels est dispo
+    try:
+        import statsmodels.api as sm  # noqa: F401
+        trend = "ols"
+    except Exception:
+        trend = None
+    fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=title)
+    st.plotly_chart(fig, width="stretch")
 
-# ===== 3) Chargement =====
-try:
-    raw = fetch_odisse(ODISSE_URL)
-except Exception as e:
-    st.error(f"Erreur de chargement ODISSE : {e}")
-    st.stop()
+def render_dataset_panel(ep: dict):
+    url = ep["url"]
+    label = ep["label"]
+    with st.spinner(f"Chargement — {label}"):
+        try:
+            raw = fetch_odisse(url)
+        except Exception as e:
+            st.error(f"Erreur de chargement pour « {label} » : {e}")
+            return
 
-df, dep_col = norm_dep_code(raw)
-df = infer_dates(df)
+    df, dep_col = norm_dep_code(raw)
+    df = infer_dates(df)
 
-st.caption(f"Source: ODISSE • Endpoint fixé dans le code • Lignes: {len(df):,}")
-st.subheader("Aperçu")
-st.dataframe(df.head(50), use_container_width=True)
+    st.caption(f"Source: ODISSE • {label} • Lignes: {len(df):,}")
+    st.dataframe(df.head(50), use_container_width=True)
 
-# ===== 4) Visus automatiques =====
-num_cols = pick_numeric(df)
-year_col = next((c for c in YEAR_CANDIDATES if c in df.columns), None)
-date_col = next((c for c in DATE_CANDIDATES if c in df.columns), None)
+    # Choix de la valeur pour la carte
+    val_col = choose_value_col(df, ep.get("value_pref"))
 
-# (A) Carte par département (moyenne) si possible
-val_for_map = num_cols[0] if num_cols else None
-if dep_col and val_for_map:
-    show_choropleth_dep(df, dep_col, val_for_map, f"Carte — {val_for_map}")
+    # Carte
+    if dep_col and val_col:
+        show_choropleth_dep(df, dep_col, val_col, f"{label} — {val_col}")
+    else:
+        st.info("Pas de couple (département, valeur) détecté pour la carte.")
 
-# (B) Série temporelle par année/date, si disponible
-time_col = date_col or year_col
-if time_col and num_cols:
-    y_cols = num_cols[:3]  # max 3 pour lisibilité
-    show_time_series(df, time_col, y_cols, "Évolution temporelle (auto)")
+    # Séries & Corrélation
+    show_time_series(df, "Évolution temporelle (auto)")
+    safe_scatter(df, "Corrélation (2 premières numériques)")
 
-# (C) Corrélation simple entre deux 1ères variables numériques
-if len(num_cols) >= 2:
-    safe_scatter(df, num_cols[0], num_cols[1], f"Corrélation — {num_cols[0]} vs {num_cols[1]}")
-
-# ===== 5) Export rapide =====
-st.markdown("---")
-st.download_button(
-    "⬇️ Export CSV (table courante)",
-    df.to_csv(index=False).encode("utf-8"),
-    file_name="odisse_couvertures_export.csv",
-    mime="text/csv",
+# ===== 3) UI — sélection & rendu =============================================
+st.markdown("### 🗺️ Sélectionne les datasets à afficher")
+choices = st.multiselect(
+    "Datasets ODISSE",
+    options=[ep["label"] for ep in ODISSE_ENDPOINTS],
+    default=[ODISSE_ENDPOINTS[0]["label"], ODISSE_ENDPOINTS[1]["label"]],
 )
+
+tabs = st.tabs(choices if choices else ["Aucun dataset"])
+if choices:
+    for tab, label in zip(tabs, choices):
+        with tab:
+            ep = next(ep for ep in ODISSE_ENDPOINTS if ep["label"] == label)
+            render_dataset_panel(ep)
+else:
+    with tabs[0]:
+        st.info("Sélectionne au moins un dataset pour afficher les visuels.")
+
+st.markdown("---")
+
