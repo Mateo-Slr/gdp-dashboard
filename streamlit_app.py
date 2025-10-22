@@ -16,7 +16,7 @@ except Exception:
     px = None  # on gérera plus bas
 
 st.set_page_config(page_title="ODISSE — Multi-cartes & Prédictions", layout="wide")
-st.title("🧬 ODISSE — Couvertures & Grippe (multi-sources)")
+
 
 # ===== 1) DATASETS ============================================================
 # kind: "api" ou "csv"
@@ -285,7 +285,7 @@ def show_time_series(df: pd.DataFrame, title="Séries temporelles (auto)"):
     if not y_cols:
         return
     fig = px.line(local, x=time_col, y=y_cols, title=title)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 def safe_scatter(df: pd.DataFrame, title: str):
     if px is None:
@@ -304,7 +304,7 @@ def safe_scatter(df: pd.DataFrame, title: str):
     except Exception:
         trend = None
     fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=title)
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 # ===== 3) Rendu spécifique PRÉDICTION =======================================
 def normalize_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -344,7 +344,7 @@ def normalize_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def render_prediction_panel(df: pd.DataFrame, label: str):
-    st.markdown("**🟣 Prédiction pour l’année à venir**")
+    st.markdown("**🟣 Prédiction pour l’année en cours**")
     df = normalize_prediction_columns(df)
 
     # Filtre année si présence de plusieurs années
@@ -353,7 +353,6 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
         year_sel = st.selectbox("Année", options=years, index=len(years)-1 if years else 0)
         df = df[df["annee"] == year_sel]
 
-    st.caption(f"Source: CSV local • {label} • Lignes: {len(df):,}")
     st.dataframe(df, use_container_width=True)
 
     # KPIs si colonnes présentes
@@ -369,8 +368,8 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
     if px is not None and "Serie" in df.columns:
         ycol = "y_pred" if "y_pred" in df.columns else choose_value_col(df, ["taux", "couverture"])
         if ycol:
-            fig = px.bar(df.dropna(subset=[ycol]), x="Serie", y=ycol, title="Taux/valeur par public (Serie)")
-            st.plotly_chart(fig, width="stretch")
+            fig = px.bar(df.dropna(subset=[ycol]), x="Serie", y=ycol, title="Taux de vacination par public (%)")
+            st.plotly_chart(fig, use_container_width=True)
 
 # ===== 4) Chargement & rendu générique =======================================
 def load_dataset(ds: dict) -> pd.DataFrame:
@@ -399,7 +398,6 @@ def render_dataset_panel(ds: dict):
     df, dep_col = norm_dep_code(raw)
     df = infer_dates(df)
 
-    st.caption(f"Source: {('ODISSE API' if ds['kind']=='api' else 'CSV local')} • {label} • Lignes: {len(df):,}")
     st.dataframe(df.head(50), use_container_width=True)
 
     # Carte uniquement si on a une colonne département
