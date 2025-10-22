@@ -1,6 +1,6 @@
 # streamlit_app.py
 # ------------------------------------------------------------
-# ODISSE — visualisations multi-datasets (APIs ODISSE + CSV locaux)
+# ODISSE — visualisations multi-sources (APIs ODISSE + CSV + CSV prédiction)
 # ------------------------------------------------------------
 import io
 import os
@@ -15,13 +15,14 @@ try:
 except Exception:
     px = None  # on gérera plus bas
 
-st.set_page_config(page_title="ODISSE — Multi-cartes", layout="wide")
+st.set_page_config(page_title="ODISSE — Multi-cartes & Prédictions", layout="wide")
 st.title("🧬 ODISSE — Couvertures & Grippe (multi-sources)")
 
-# ===== 1) DATASETS (APIs limitées à 100 + CSV locaux) ========================
+# ===== 1) DATASETS ============================================================
 # kind: "api" ou "csv"
+# is_prediction: True pour activer l'UI prédiction (KPI, badges, graph dédié)
 DATASETS = [
-    # --- APIs ODISSE ---
+    # --- APIs ODISSE (limitées à 100) ---
     {
         "label": "Couvertures vaccinales — ados & adultes (département) [API]",
         "kind": "api",
@@ -70,6 +71,19 @@ DATASETS = [
         "path": "data/doses-actes-2024.csv",
         "value_pref": ["doses", "actes", "nb", "taux", "incidence", "value"],
     },
+
+    # --- CSV PRÉDICTION (année à venir) ---
+    # Adapte le nom de fichier ci-dessous à ton CSV réel dans ./data/
+    {
+        "label": "Prédiction vaccination — année à venir [CSV]",
+        "kind": "csv",
+        "path": "data/prediction-vaccination-annee-prochaine.csv",
+        "is_prediction": True,
+        # colonnes que tu m'as décrites : Serie, année, y_pred, population,
+        # dose par schéma (pas essentiel), Doses totales arrondies,
+        # Doses avec marges arrondies
+        "value_pref": ["y_pred", "taux", "couverture"],  # pour graph lignes/barres
+    },
 ]
 # ============================================================================
 
@@ -90,7 +104,8 @@ def _friendly_network_error(e: Exception) -> str:
     msg = str(e)
     tips = []
     if any(k in msg for k in ["Failed to establish a new connection", "Device or resource busy", "Errno 16"]):
-        tips.append("Sortie réseau bloquée : dans Snowflake, activer une External Access Integration pour `odisse.santepubliquefrance.fr:443` et `raw.githubusercontent.com:443` puis l’attacher à l’app.")
+        tips.append("Sortie réseau bloquée : dans Snowflake, activer une External Access Integration pour "
+                    "`odisse.santepubliquefrance.fr:443` et `raw.githubusercontent.com:443` puis l’attacher à l’app.")
     if "HTTPSConnectionPool" in msg:
         tips.append("Vérifier DNS/SSL plateforme et l’URL.")
     return " ".join(tips) or msg
@@ -102,7 +117,7 @@ def fetch_api(url: str) -> pd.DataFrame:
     last_exc = None
     for attempt in range(3):
         try:
-            # S’assure que limit=100 est présent (au cas où)
+            # S’assure que limit=100 est présent
             if "limit=" not in url:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}limit=100"
@@ -136,14 +151,12 @@ def fetch_csv(path: str) -> pd.DataFrame:
     """Charge un CSV local (dans le repo)."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Fichier introuvable : {path} (mets-le dans le repo)")
-
     # Encodage: on tente utf-8 puis latin-1
     for enc in ("utf-8", "latin-1"):
         try:
             return pd.read_csv(path, encoding=enc)
         except UnicodeDecodeError:
             continue
-    # Dernier essai sans encodage explicite
     return pd.read_csv(path)
 
 def norm_dep_code(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
@@ -196,7 +209,7 @@ def pick_numeric(df: pd.DataFrame) -> list[str]:
     pref = [c for c in num_cols if any(k in c.lower()
             for k in ["couverture", "grippe", "covid", "hpv",
                       "meningo", "taux", "ratio", "pourcent", "pct",
-                      "value", "nb", "passages", "actes", "incidence", "doses"])]
+                      "value", "nb", "passages", "actes", "incidence", "doses", "y_pred"])]
     return pref if pref else num_cols
 
 def choose_value_col(df: pd.DataFrame, prefs: list[str] | None) -> str | None:
@@ -293,6 +306,73 @@ def safe_scatter(df: pd.DataFrame, title: str):
     fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=title)
     st.plotly_chart(fig, width="stretch")
 
+# ===== 3) Rendu spécifique PRÉDICTION =======================================
+def normalize_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Harmonise quelques colonnes usuelles du CSV de prédiction."""
+    out = df.copy()
+    # Uniformise quelques noms (sans casser si absents)
+    rename_map = {}
+    for c in out.columns:
+        lc = c.strip().lower()
+        if lc == "serie":
+            rename_map[c] = "Serie"
+        elif lc in ("annee", "année", "annee calculée", "année calculée"):
+            rename_map[c] = "annee"
+        elif lc in ("y_pred", "ŷ", "yhat", "y_hat", "prediction", "prédiction"):
+            rename_map[c] = "y_pred"
+        elif lc in ("population", "pop"):
+            rename_map[c] = "population"
+        elif "doses totales" in lc:
+            rename_map[c] = "Doses totales arrondies"
+        elif "marges" in lc:
+            rename_map[c] = "Doses avec marges arrondies"
+        elif "dose par schéma" in lc or "doses par schema" in lc:
+            rename_map[c] = "dose par schéma"
+    if rename_map:
+        out = out.rename(columns=rename_map)
+
+    # Types
+    if "annee" in out.columns:
+        try:
+            out["annee"] = pd.to_numeric(out["annee"], errors="coerce").astype("Int64")
+        except Exception:
+            pass
+    for col in ["y_pred", "population", "Doses totales arrondies", "Doses avec marges arrondies"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    return out
+
+def render_prediction_panel(df: pd.DataFrame, label: str):
+    st.markdown("**🟣 Prédiction pour l’année à venir**")
+    df = normalize_prediction_columns(df)
+
+    # Filtre année si présence de plusieurs années
+    if "annee" in df.columns and df["annee"].notna().any():
+        years = sorted({int(x) for x in df["annee"].dropna().unique()})
+        year_sel = st.selectbox("Année", options=years, index=len(years)-1 if years else 0)
+        df = df[df["annee"] == year_sel]
+
+    st.caption(f"Source: CSV local • {label} • Lignes: {len(df):,}")
+    st.dataframe(df, use_container_width=True)
+
+    # KPIs si colonnes présentes
+    cols = st.columns(3, gap="large")
+    if "y_pred" in df.columns:
+        cols[0].metric("Taux prédit (moy.)", f"{df['y_pred'].mean():.2f}")
+    if "Doses totales arrondies" in df.columns:
+        cols[1].metric("Doses totales (arr.)", f"{int(round(df['Doses totales arrondies'].sum())):,}".replace(",", " "))
+    if "Doses avec marges arrondies" in df.columns:
+        cols[2].metric("Doses + marge 5% (arr.)", f"{int(round(df['Doses avec marges arrondies'].sum())):,}".replace(",", " "))
+
+    # Graph barres par Serie (public concerné)
+    if px is not None and "Serie" in df.columns:
+        ycol = "y_pred" if "y_pred" in df.columns else choose_value_col(df, ["taux", "couverture"])
+        if ycol:
+            fig = px.bar(df.dropna(subset=[ycol]), x="Serie", y=ycol, title="Taux/valeur par public (Serie)")
+            st.plotly_chart(fig, width="stretch")
+
+# ===== 4) Chargement & rendu générique =======================================
 def load_dataset(ds: dict) -> pd.DataFrame:
     if ds["kind"] == "api":
         return fetch_api(ds["path"])
@@ -310,6 +390,12 @@ def render_dataset_panel(ds: dict):
             st.error(f"Erreur de chargement pour « {label} » : {e}")
             return
 
+    # Si dataset de prédiction : UI dédiée, pas de carte
+    if ds.get("is_prediction"):
+        render_prediction_panel(raw, label)
+        return
+
+    # Sinon : pipeline normal
     df, dep_col = norm_dep_code(raw)
     df = infer_dates(df)
 
@@ -323,11 +409,11 @@ def render_dataset_panel(ds: dict):
     else:
         st.info("Pas de couple (département, valeur) détecté pour la carte.")
 
-    # Séries & Corrélation
+    # Séries & Corrélation (si données temporelles et numériques)
     show_time_series(df, "Évolution temporelle (auto)")
     safe_scatter(df, "Corrélation (2 premières numériques)")
 
-# ===== 3) UI — sélection & rendu =============================================
+# ===== 5) UI — sélection & rendu =============================================
 st.markdown("### 🗺️ Sélectionne les datasets à afficher")
 options = [ds["label"] for ds in DATASETS]
 default_sel = [ds["label"] for ds in DATASETS]  # tout coché par défaut
@@ -343,8 +429,4 @@ else:
     with tabs[0]:
         st.info("Sélectionne au moins un dataset pour afficher les visuels.")
 
-st.markdown("---")
-st.markdown(
-    "💡 Mets tes CSV dans `data/` et ajuste `DATASETS` ci-dessus si tu changes de noms de fichiers. "
-    "Tu peux aussi ajouter d'autres endpoints ODISSE (garde `?limit=100`)."
-)
+

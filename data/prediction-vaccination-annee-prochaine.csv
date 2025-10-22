@@ -1,0 +1,7 @@
+serie,annee,y_pred,population_eligible,doses_par_schema,doses_totales_arrondies,doses_avec_marge_arrondies
+Grippe 65 ans et plus,2025,53.7,13728718.0,1.0,7372322,7740938
+Grippe moins de 65 ans à risque,2025,25.3,1944568.8,1.0,491976,516575
+HPV filles 1 dose à 15 ans,2025,61.3092,404036.0,1.0,247712,260097
+HPV filles 2 doses à 16 ans,2025,50.2809,402977.0,2.0,405241,425503
+Méningocoque C 10-14 ans,2025,78.5636,4187992.0,1.0,3290238,3454750
+Méningocoque C 15-19 ans,2025,56.8173,4140996.0,1.0,2352803,2470443
