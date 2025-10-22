@@ -95,6 +95,32 @@ DEP_CANDIDATES = [
 YEAR_CANDIDATES = ["annee", "year", "Annee", "ANNEE"]
 DATE_CANDIDATES = ["date", "Date", "DATE"]
 
+# Dictionnaire de définitions médicales/techniques
+DEFINITIONS = {
+    "hpv1": "HPV1 : Première dose du vaccin contre le papillomavirus humain (protection contre cancers et verrues génitales)",
+    "hpv2": "HPV2 : Deuxième dose du vaccin HPV (complète le schéma vaccinal 11-14 ans)",
+    "hpv3": "HPV3 : Troisième dose du vaccin HPV (schéma de rattrapage 15-19 ans)",
+    "dtpolio": "dTPolio : Vaccin diphtérie-tétanos-poliomyélite (rappel adulte)",
+    "grippe": "Grippe : Vaccination contre la grippe saisonnière",
+    "covid": "COVID-19 : Vaccination contre le coronavirus SARS-CoV-2",
+    "meningo": "Méningocoque : Vaccination contre les méningites bactériennes",
+    "passages": "Passages aux urgences : Nombre de consultations aux services d'urgences",
+    "actes": "Actes SOS Médecins : Nombre d'interventions de SOS Médecins",
+    "incidence": "Incidence : Nombre de nouveaux cas pour 100 000 habitants",
+    "couverture": "Couverture vaccinale : Pourcentage de la population vaccinée",
+}
+
+def get_legend_for_data(df: pd.DataFrame) -> list[str]:
+    """Détecte les termes médicaux présents dans les données et retourne leurs définitions."""
+    legends = []
+    cols_lower = [c.lower() for c in df.columns]
+    
+    for term, definition in DEFINITIONS.items():
+        if any(term in col for col in cols_lower):
+            legends.append(definition)
+    
+    return legends
+
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """Nettoie et normalise les noms de colonnes pour un affichage cohérent."""
     rename_map = {}
@@ -330,6 +356,20 @@ def show_time_series(df: pd.DataFrame, title="Séries temporelles (auto)"):
     fig = px.line(local, x=time_col, y=y_cols, title=title)
     st.plotly_chart(fig, use_container_width=True)
 
+def get_unit_label(col_name: str) -> str:
+    """Détermine l'unité d'une colonne selon son nom."""
+    col_lower = col_name.lower()
+    if any(term in col_lower for term in ["taux", "couverture", "pct", "pourcent", "%"]):
+        return "%"
+    elif any(term in col_lower for term in ["population", "hab"]):
+        return "habitants"
+    elif any(term in col_lower for term in ["doses", "actes", "passages", "nombre", "nb"]):
+        return "nombre"
+    elif "incidence" in col_lower:
+        return "pour 100k hab."
+    else:
+        return ""
+
 def safe_scatter(df: pd.DataFrame, title: str):
     if px is None:
         return
@@ -340,13 +380,23 @@ def safe_scatter(df: pd.DataFrame, title: str):
     tmp = df[[x, y]].dropna()
     if tmp.empty:
         return
+    
+    # Construire un titre explicite avec les noms de variables et unités
+    x_unit = get_unit_label(x)
+    y_unit = get_unit_label(y)
+    x_label = f"{x} ({x_unit})" if x_unit else x
+    y_label = f"{y} ({y_unit})" if y_unit else y
+    scatter_title = f"Relation entre {x} et {y}"
+    
     # trendline seulement si statsmodels est dispo
     try:
         import statsmodels.api as sm  # noqa: F401
         trend = "ols"
     except Exception:
         trend = None
-    fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=title)
+    
+    fig = px.scatter(tmp, x=x, y=y, trendline=trend, title=scatter_title,
+                     labels={x: x_label, y: y_label})
     st.plotly_chart(fig, use_container_width=True)
 
 # ===== 3) Rendu spécifique PRÉDICTION =======================================
@@ -401,6 +451,13 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
     # Supprimer colonnes complètement vides
     df_display = df_display.dropna(axis=1, how='all')
     
+    # Afficher légende si termes médicaux détectés
+    legends = get_legend_for_data(df)
+    if legends:
+        with st.expander("ℹ️ Légende et définitions", expanded=False):
+            for leg in legends:
+                st.markdown(f"- {leg}")
+    
     st.dataframe(df_display, use_container_width=True)
 
     # KPIs si colonnes présentes
@@ -451,6 +508,13 @@ def render_dataset_panel(ds: dict):
     # Supprimer colonnes complètement vides
     df_display = df_display.dropna(axis=1, how='all')
     
+    # Afficher légende si termes médicaux détectés
+    legends = get_legend_for_data(df)
+    if legends:
+        with st.expander("ℹ️ Légende et définitions", expanded=False):
+            for leg in legends:
+                st.markdown(f"- {leg}")
+    
     st.dataframe(df_display.head(50), use_container_width=True)
 
     # Carte uniquement si on a une colonne département
@@ -462,7 +526,7 @@ def render_dataset_panel(ds: dict):
 
     # Séries & Corrélation (si données temporelles et numériques)
     show_time_series(df, "Évolution temporelle (auto)")
-    safe_scatter(df, "Corrélation (2 premières numériques)")
+    safe_scatter(df, "Analyse de corrélation")
 
 # ===== 5) UI — sélection & rendu =============================================
 st.markdown("### 🗺️ Sélectionne les datasets à afficher")
