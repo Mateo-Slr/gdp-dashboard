@@ -116,8 +116,10 @@ DEFINITIONS = {
     "actes": "Actes SOS Médecins : Nombre d'interventions de SOS Médecins",
     "incidence": "Incidence : Nombre de nouveaux cas pour 100 000 habitants",
     "couverture": "Couverture vaccinale : Pourcentage de la population vaccinée",
-    "score_risque": "Score de risque : Indicateur de risque grippe (< 25 = faible, 25-50 = moyen, > 50 = élevé)",
+    "score_risque": "Score de risque : Indicateur composite du risque grippe basé sur vaccination et urgences",
     "risque": "Risque grippe : Probabilité d'augmentation des cas par rapport à l'année précédente",
+    "evolution": "Évolution du risque : Variation en % du score de risque entre 2024 et 2025 (négatif = amélioration)",
+    "tendance": "Tendance : Indique si le risque est en augmentation ou diminution par rapport à l'année précédente",
 }
 
 def get_legend_for_data(df: pd.DataFrame) -> list[str]:
@@ -340,8 +342,8 @@ def show_choropleth_dep(df: pd.DataFrame, dep_col: str, val_col: str, title="Car
     except Exception as e:
         st.error(f"Carte indisponible : {e}")
 
-def show_risk_map_regions(df: pd.DataFrame, region_col: str, risk_col: str, title="Carte de risque grippe par région"):
-    """Affiche une carte avec code couleur : <25 = moins de risque (vert), >25 = plus de risque (rouge)."""
+def show_risk_map_regions(df: pd.DataFrame, region_col: str, risk_col: str, evolution_col: str = None, title="Carte de risque grippe par région"):
+    """Affiche une carte avec code couleur basée sur l'évolution du risque par rapport à l'année précédente."""
     try:
         import geopandas as gpd, folium, json as _json
         from folium import GeoJson
@@ -353,8 +355,16 @@ def show_risk_map_regions(df: pd.DataFrame, region_col: str, risk_col: str, titl
         geo_url = "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/regions.geojson"
         gdf_geo = gpd.read_file(geo_url)[["nom", "geometry"]].rename(columns={"nom": "region"})
         
-        tmp = df[[region_col, risk_col]].dropna().copy()
-        tmp.rename(columns={region_col: "region", risk_col: "risk_score"}, inplace=True)
+        # Colonnes à inclure
+        cols_to_merge = [region_col, risk_col]
+        if evolution_col and evolution_col in df.columns:
+            cols_to_merge.append(evolution_col)
+        
+        tmp = df[cols_to_merge].dropna(subset=[region_col, risk_col]).copy()
+        rename_dict = {region_col: "region", risk_col: "risk_score"}
+        if evolution_col:
+            rename_dict[evolution_col] = "evolution"
+        tmp.rename(columns=rename_dict, inplace=True)
         
         # Normaliser les noms de régions
         tmp["region"] = tmp["region"].str.strip()
@@ -365,42 +375,58 @@ def show_risk_map_regions(df: pd.DataFrame, region_col: str, risk_col: str, titl
         # Créer la carte
         m = folium.Map(location=(46.6, 2.5), zoom_start=6, tiles="cartodbpositron")
         
-        # Fonction de style basée sur le score de risque
+        # Fonction de style basée sur l'évolution du risque
         def style_function(feature):
+            evolution = feature['properties'].get('evolution') if 'evolution' in feature['properties'] else None
             risk = feature['properties'].get('risk_score')
-            if risk is None:
+            
+            if evolution is None or risk is None:
                 return {'fillColor': 'gray', 'color': 'black', 'weight': 1, 'fillOpacity': 0.3}
-            elif risk < 25:
-                # Moins de risque : vert
-                return {'fillColor': 'green', 'color': 'black', 'weight': 1, 'fillOpacity': 0.6}
-            else:
-                # Plus de risque : rouge (plus foncé si score élevé)
-                intensity = min((risk - 25) / 75, 1)  # normaliser entre 25 et 100
-                red_val = int(255)
-                green_val = int(255 * (1 - intensity))
-                color = f'#{red_val:02x}{green_val:02x}00'
+            
+            # Vert si diminution, rouge si augmentation
+            # Intensité basée sur le pourcentage d'évolution
+            if evolution < 0:
+                # Diminution : vert (plus foncé = plus forte diminution)
+                intensity = min(abs(evolution) / 20, 1)  # Normaliser sur 20%
+                green_val = int(100 + 155 * intensity)  # De vert clair à vert foncé
+                color = f'#00{green_val:02x}00'
                 return {'fillColor': color, 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
+            else:
+                # Augmentation : rouge (plus foncé = plus forte augmentation)
+                intensity = min(evolution / 20, 1)  # Normaliser sur 20%
+                red_val = int(255)
+                other_val = int(255 * (1 - intensity))
+                color = f'#{red_val:02x}{other_val:02x}{other_val:02x}'
+                return {'fillColor': color, 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
+        
+        # Tooltip fields
+        tooltip_fields = ['region', 'risk_score']
+        tooltip_aliases = ['Région:', 'Score 2025:']
+        if 'evolution' in merged.columns:
+            tooltip_fields.append('evolution')
+            tooltip_aliases.append('Évolution (%):')
         
         # Ajouter les régions avec style conditionnel
         GeoJson(
             merged,
             style_function=style_function,
             tooltip=folium.GeoJsonTooltip(
-                fields=['region', 'risk_score'],
-                aliases=['Région:', 'Score de risque:'],
+                fields=tooltip_fields,
+                aliases=tooltip_aliases,
                 localize=True
             )
         ).add_to(m)
         
         # Légende personnalisée
         legend_html = '''
-        <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; height: 120px; 
+        <div style="position: fixed; bottom: 50px; left: 50px; width: 240px; height: 130px; 
                     background-color: white; border:2px solid grey; z-index:9999; font-size:14px;
                     padding: 10px">
-        <p style="margin: 0; font-weight: bold;">Niveau de risque grippe</p>
-        <p style="margin: 5px 0;"><span style="background-color: green; padding: 3px 10px; color: white;">■</span> Faible risque (score < 25)</p>
-        <p style="margin: 5px 0;"><span style="background-color: orange; padding: 3px 10px; color: white;">■</span> Risque moyen (25-50)</p>
-        <p style="margin: 5px 0;"><span style="background-color: red; padding: 3px 10px; color: white;">■</span> Risque élevé (> 50)</p>
+        <p style="margin: 0; font-weight: bold;">Évolution du risque grippe 2024→2025</p>
+        <p style="margin: 5px 0;"><span style="background-color: darkgreen; padding: 3px 10px; color: white;">■</span> Forte diminution (< -10%)</p>
+        <p style="margin: 5px 0;"><span style="background-color: lightgreen; padding: 3px 10px;">■</span> Légère diminution (0 à -10%)</p>
+        <p style="margin: 5px 0;"><span style="background-color: lightcoral; padding: 3px 10px;">■</span> Légère augmentation (0 à +10%)</p>
+        <p style="margin: 5px 0;"><span style="background-color: darkred; padding: 3px 10px; color: white;">■</span> Forte augmentation (> +10%)</p>
         </div>
         '''
         m.get_root().html.add_child(folium.Element(legend_html))
@@ -566,31 +592,57 @@ def render_prediction_panel(df: pd.DataFrame, label: str, is_risk_map: bool = Fa
 
     # Si carte de risque grippe par régions
     if is_risk_map:
-        # Chercher colonne région et score de risque
+        # Chercher colonnes région, score de risque, et évolution
         region_col = None
         risk_col = None
+        evolution_col = None
+        tendance_col = None
+        score_2024_col = None
         
         for col in df.columns:
             col_lower = col.lower()
             if "region" in col_lower or col == "Region":
                 region_col = col
-            if "risque" in col_lower or "risk" in col_lower or "score" in col_lower:
+            if "score_risque_predit_2025" in col_lower or "score_risque_2025" in col_lower:
                 risk_col = col
+            elif ("risque" in col_lower or "risk" in col_lower) and "2024" in col_lower:
+                score_2024_col = col
+            if "evolution" in col_lower and "%" in col:
+                evolution_col = col
+            if "tendance" in col_lower:
+                tendance_col = col
         
         if region_col and risk_col:
-            # Convertir le score en numérique
+            # Convertir les colonnes numériques
             df[risk_col] = pd.to_numeric(df[risk_col], errors='coerce')
+            if score_2024_col:
+                df[score_2024_col] = pd.to_numeric(df[score_2024_col], errors='coerce')
+            if evolution_col:
+                df[evolution_col] = pd.to_numeric(df[evolution_col], errors='coerce')
             
-            show_risk_map_regions(df, region_col, risk_col, "Prédiction risque grippe 2025 par région")
+            show_risk_map_regions(df, region_col, risk_col, evolution_col, "Évolution du risque grippe 2024 → 2025")
             
             # KPIs spécifiques
-            st.markdown("#### 📊 Analyse du risque")
-            cols = st.columns(3, gap="large")
+            st.markdown("#### 📊 Analyse de l'évolution du risque")
+            cols = st.columns(4, gap="medium")
+            
             risk_values = df[risk_col].dropna()
             if not risk_values.empty:
-                cols[0].metric("Score moyen", f"{risk_values.mean():.1f}")
-                cols[1].metric("Régions à risque élevé (>50)", len(risk_values[risk_values > 50]))
-                cols[2].metric("Régions à faible risque (<25)", len(risk_values[risk_values < 25]))
+                cols[0].metric("Score moyen 2025", f"{risk_values.mean():.1f}")
+            
+            if score_2024_col:
+                score_2024_values = df[score_2024_col].dropna()
+                if not score_2024_values.empty:
+                    cols[1].metric("Score moyen 2024", f"{score_2024_values.mean():.1f}")
+            
+            if evolution_col:
+                evolution_values = df[evolution_col].dropna()
+                if not evolution_values.empty:
+                    cols[2].metric("Évolution moyenne", f"{evolution_values.mean():.1f}%")
+            
+            if tendance_col:
+                augmentation = len(df[df[tendance_col].str.lower() == "augmentation"])
+                cols[3].metric("Régions en hausse", augmentation)
         return
 
     # KPIs si colonnes présentes (pour autres prédictions)
