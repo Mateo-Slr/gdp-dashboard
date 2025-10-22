@@ -24,7 +24,7 @@ st.set_page_config(page_title="ODISSE — Multi-cartes & Prédictions", layout="
 DATASETS = [
     # --- APIs ODISSE (limitées à 100) ---
     {
-        "label": "Couvertures vaccinales — ados & adultes (département) [API]",
+        "label": "Couvertures vaccinales — ados & adultes (département)",
         "kind": "api",
         "path": (
             "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
@@ -33,7 +33,7 @@ DATASETS = [
         "value_pref": ["couverture", "taux", "pct", "pourcent", "value"],
     },
     {
-        "label": "Grippe — urgences & SOS Médecins (département) [API]",
+        "label": "Grippe — urgences & SOS Médecins (département)",
         "kind": "api",
         "path": (
             "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
@@ -42,7 +42,7 @@ DATASETS = [
         "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
     },
     {
-        "label": "Grippe — urgences & SOS Médecins (France) [API]",
+        "label": "Grippe — urgences & SOS Médecins (France)",
         "kind": "api",
         "path": (
             "https://odisse.santepubliquefrance.fr/api/explore/v2.1/catalog/datasets/"
@@ -54,19 +54,19 @@ DATASETS = [
 
     # --- CSV locaux (mets-les dans ./data/) ---
     {
-        "label": "Couvertures locales 2024 (département) [CSV]",
+        "label": "Couvertures locales 2024 (département)",
         "kind": "csv",
         "path": "data/couverture-2024.csv",
         "value_pref": ["couverture", "taux", "pct", "pourcent", "value"],
     },
     {
-        "label": "Campagne 2024 (département) [CSV]",
+        "label": "Campagne 2024 (département)",
         "kind": "csv",
         "path": "data/campagne-2024.csv",
         "value_pref": ["passages", "actes", "nb", "taux", "incidence", "value"],
     },
     {
-        "label": "Doses & actes 2024 (département) [CSV]",
+        "label": "Doses & actes 2024 (département)",
         "kind": "csv",
         "path": "data/doses-actes-2024.csv",
         "value_pref": ["doses", "actes", "nb", "taux", "incidence", "value"],
@@ -75,7 +75,7 @@ DATASETS = [
     # --- CSV PRÉDICTION (année à venir) ---
     # Adapte le nom de fichier ci-dessous à ton CSV réel dans ./data/
     {
-        "label": "Prédiction vaccination — année à venir [CSV]",
+        "label": "Prédiction vaccination — année à venir",
         "kind": "csv",
         "path": "data/prediction-vaccination-annee-prochaine.csv",
         "is_prediction": True,
@@ -94,6 +94,49 @@ DEP_CANDIDATES = [
 ]
 YEAR_CANDIDATES = ["annee", "year", "Annee", "ANNEE"]
 DATE_CANDIDATES = ["date", "Date", "DATE"]
+
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Nettoie et normalise les noms de colonnes pour un affichage cohérent."""
+    rename_map = {}
+    for col in df.columns:
+        new_name = col
+        # Supprimer préfixes techniques
+        if new_name.startswith(("api.", "fields.", "properties.")):
+            new_name = new_name.split(".", 1)[1]
+        
+        # Remplacements standards pour lisibilité
+        replacements = {
+            "_": " ",
+            "code_dep": "Département",
+            "code_departement": "Département", 
+            "departement": "Département",
+            "dep": "Département",
+            "annee": "Année",
+            "year": "Année",
+            "date": "Date",
+            "couverture": "Couverture (%)",
+            "taux": "Taux (%)",
+            "pct": "Pourcentage",
+            "y_pred": "Taux prédit (%)",
+            "population": "Population",
+            "doses": "Doses",
+            "actes": "Actes",
+            "passages": "Passages",
+            "incidence": "Incidence",
+            "serie": "Public concerné",
+            "Serie": "Public concerné",
+        }
+        
+        for old, new in replacements.items():
+            if old in new_name.lower():
+                new_name = new_name.replace(old, new)
+                break
+        
+        # Capitaliser première lettre
+        new_name = " ".join(word.capitalize() for word in new_name.split())
+        rename_map[col] = new_name
+    
+    return df.rename(columns=rename_map)
 
 def _requests_session():
     s = requests.Session()
@@ -344,7 +387,7 @@ def normalize_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def render_prediction_panel(df: pd.DataFrame, label: str):
-    st.markdown("**🟣 Prédiction pour l’année en cours**")
+    st.markdown("**🟣 Prédiction pour l'année en cours**")
     df = normalize_prediction_columns(df)
 
     # Filtre année si présence de plusieurs années
@@ -353,7 +396,12 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
         year_sel = st.selectbox("Année", options=years, index=len(years)-1 if years else 0)
         df = df[df["annee"] == year_sel]
 
-    st.dataframe(df, use_container_width=True)
+    # Nettoyer les noms de colonnes et masquer les colonnes vides
+    df_display = clean_column_names(df)
+    # Supprimer colonnes complètement vides
+    df_display = df_display.dropna(axis=1, how='all')
+    
+    st.dataframe(df_display, use_container_width=True)
 
     # KPIs si colonnes présentes
     cols = st.columns(3, gap="large")
@@ -368,7 +416,7 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
     if px is not None and "Serie" in df.columns:
         ycol = "y_pred" if "y_pred" in df.columns else choose_value_col(df, ["taux", "couverture"])
         if ycol:
-            fig = px.bar(df.dropna(subset=[ycol]), x="Serie", y=ycol, title="Taux de vacination par public (%)")
+            fig = px.bar(df.dropna(subset=[ycol]), x="Serie", y=ycol, title="Taux de vaccination par public (%)")
             st.plotly_chart(fig, use_container_width=True)
 
 # ===== 4) Chargement & rendu générique =======================================
@@ -398,7 +446,12 @@ def render_dataset_panel(ds: dict):
     df, dep_col = norm_dep_code(raw)
     df = infer_dates(df)
 
-    st.dataframe(df.head(50), use_container_width=True)
+    # Nettoyer les noms de colonnes et masquer les colonnes vides
+    df_display = clean_column_names(df)
+    # Supprimer colonnes complètement vides
+    df_display = df_display.dropna(axis=1, how='all')
+    
+    st.dataframe(df_display.head(50), use_container_width=True)
 
     # Carte uniquement si on a une colonne département
     val_col = choose_value_col(df, ds.get("value_pref"))
