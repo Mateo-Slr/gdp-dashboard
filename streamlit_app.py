@@ -230,12 +230,19 @@ def fetch_csv(path: str) -> pd.DataFrame:
     """Charge un CSV local (dans le repo)."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Fichier introuvable : {path} (mets-le dans le repo)")
-    # Encodage: on tente utf-8 puis latin-1
-    for enc in ("utf-8", "latin-1"):
-        try:
-            return pd.read_csv(path, encoding=enc)
-        except UnicodeDecodeError:
-            continue
+    
+    # Essayer différents séparateurs et encodages
+    for sep in (",", ";"):
+        for enc in ("utf-8", "latin-1"):
+            try:
+                df = pd.read_csv(path, encoding=enc, sep=sep)
+                # Vérifier que le CSV a été bien parsé (plus d'une colonne ou colonnes valides)
+                if len(df.columns) > 1 or (len(df.columns) == 1 and not df.columns[0].count(";")):
+                    return df
+            except (UnicodeDecodeError, pd.errors.ParserError):
+                continue
+    
+    # Fallback par défaut
     return pd.read_csv(path)
 
 def norm_dep_code(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
@@ -538,7 +545,24 @@ def render_prediction_panel(df: pd.DataFrame, label: str, is_risk_map: bool = Fa
             for leg in legends:
                 st.markdown(f"- {leg}")
     
-    st.dataframe(df_display, use_container_width=True)
+    # Formater les colonnes numériques pour un meilleur affichage
+    df_display_formatted = df_display.copy()
+    for col in df_display_formatted.columns:
+        if pd.api.types.is_numeric_dtype(df_display_formatted[col]):
+            # Arrondir à 2 décimales pour les nombres
+            df_display_formatted[col] = df_display_formatted[col].round(2)
+    
+    st.dataframe(
+        df_display_formatted, 
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            col: st.column_config.NumberColumn(
+                col,
+                format="%.2f" if pd.api.types.is_float_dtype(df_display_formatted[col]) else "%d"
+            ) for col in df_display_formatted.columns if pd.api.types.is_numeric_dtype(df_display_formatted[col])
+        }
+    )
 
     # Si carte de risque grippe par régions
     if is_risk_map:
@@ -554,6 +578,9 @@ def render_prediction_panel(df: pd.DataFrame, label: str, is_risk_map: bool = Fa
                 risk_col = col
         
         if region_col and risk_col:
+            # Convertir le score en numérique
+            df[risk_col] = pd.to_numeric(df[risk_col], errors='coerce')
+            
             show_risk_map_regions(df, region_col, risk_col, "Prédiction risque grippe 2025 par région")
             
             # KPIs spécifiques
@@ -621,7 +648,24 @@ def render_dataset_panel(ds: dict):
             for leg in legends:
                 st.markdown(f"- {leg}")
     
-    st.dataframe(df_display.head(50), use_container_width=True)
+    # Formater les colonnes numériques pour un meilleur affichage
+    df_display_formatted = df_display.head(50).copy()
+    for col in df_display_formatted.columns:
+        if pd.api.types.is_numeric_dtype(df_display_formatted[col]):
+            # Arrondir à 2 décimales pour les nombres
+            df_display_formatted[col] = df_display_formatted[col].round(2)
+    
+    st.dataframe(
+        df_display_formatted, 
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            col: st.column_config.NumberColumn(
+                col,
+                format="%.2f" if pd.api.types.is_float_dtype(df_display_formatted[col]) else "%d"
+            ) for col in df_display_formatted.columns if pd.api.types.is_numeric_dtype(df_display_formatted[col])
+        }
+    )
 
     # Carte uniquement si on a une colonne département
     val_col = choose_value_col(df, ds.get("value_pref"))
