@@ -84,6 +84,14 @@ DATASETS = [
         # Doses avec marges arrondies
         "value_pref": ["y_pred", "taux", "couverture"],  # pour graph lignes/barres
     },
+    {
+        "label": "Prédiction risque grippe 2025 (régions)",
+        "kind": "csv",
+        "path": "data/predictions_risque_grippe_2025.csv",
+        "is_prediction": True,
+        "is_risk_map": True,  # Active le rendu de carte de risque
+        "value_pref": ["Score_Risque_Predit_2025"],
+    },
 ]
 # ============================================================================
 
@@ -108,6 +116,8 @@ DEFINITIONS = {
     "actes": "Actes SOS Médecins : Nombre d'interventions de SOS Médecins",
     "incidence": "Incidence : Nombre de nouveaux cas pour 100 000 habitants",
     "couverture": "Couverture vaccinale : Pourcentage de la population vaccinée",
+    "score_risque": "Score de risque : Indicateur de risque grippe (< 25 = faible, 25-50 = moyen, > 50 = élevé)",
+    "risque": "Risque grippe : Probabilité d'augmentation des cas par rapport à l'année précédente",
 }
 
 def get_legend_for_data(df: pd.DataFrame) -> list[str]:
@@ -323,6 +333,76 @@ def show_choropleth_dep(df: pd.DataFrame, dep_col: str, val_col: str, title="Car
     except Exception as e:
         st.error(f"Carte indisponible : {e}")
 
+def show_risk_map_regions(df: pd.DataFrame, region_col: str, risk_col: str, title="Carte de risque grippe par région"):
+    """Affiche une carte avec code couleur : <25 = moins de risque (vert), >25 = plus de risque (rouge)."""
+    try:
+        import geopandas as gpd, folium, json as _json
+        from folium import GeoJson
+    except Exception:
+        st.info("Carte non disponible (geopandas/folium non installés).")
+        return
+    try:
+        # GeoJSON des régions françaises
+        geo_url = "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/regions.geojson"
+        gdf_geo = gpd.read_file(geo_url)[["nom", "geometry"]].rename(columns={"nom": "region"})
+        
+        tmp = df[[region_col, risk_col]].dropna().copy()
+        tmp.rename(columns={region_col: "region", risk_col: "risk_score"}, inplace=True)
+        
+        # Normaliser les noms de régions
+        tmp["region"] = tmp["region"].str.strip()
+        gdf_geo["region"] = gdf_geo["region"].str.strip()
+        
+        merged = gdf_geo.merge(tmp, on="region", how="left")
+        
+        # Créer la carte
+        m = folium.Map(location=(46.6, 2.5), zoom_start=6, tiles="cartodbpositron")
+        
+        # Fonction de style basée sur le score de risque
+        def style_function(feature):
+            risk = feature['properties'].get('risk_score')
+            if risk is None:
+                return {'fillColor': 'gray', 'color': 'black', 'weight': 1, 'fillOpacity': 0.3}
+            elif risk < 25:
+                # Moins de risque : vert
+                return {'fillColor': 'green', 'color': 'black', 'weight': 1, 'fillOpacity': 0.6}
+            else:
+                # Plus de risque : rouge (plus foncé si score élevé)
+                intensity = min((risk - 25) / 75, 1)  # normaliser entre 25 et 100
+                red_val = int(255)
+                green_val = int(255 * (1 - intensity))
+                color = f'#{red_val:02x}{green_val:02x}00'
+                return {'fillColor': color, 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
+        
+        # Ajouter les régions avec style conditionnel
+        GeoJson(
+            merged,
+            style_function=style_function,
+            tooltip=folium.GeoJsonTooltip(
+                fields=['region', 'risk_score'],
+                aliases=['Région:', 'Score de risque:'],
+                localize=True
+            )
+        ).add_to(m)
+        
+        # Légende personnalisée
+        legend_html = '''
+        <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; height: 120px; 
+                    background-color: white; border:2px solid grey; z-index:9999; font-size:14px;
+                    padding: 10px">
+        <p style="margin: 0; font-weight: bold;">Niveau de risque grippe</p>
+        <p style="margin: 5px 0;"><span style="background-color: green; padding: 3px 10px; color: white;">■</span> Faible risque (score < 25)</p>
+        <p style="margin: 5px 0;"><span style="background-color: orange; padding: 3px 10px; color: white;">■</span> Risque moyen (25-50)</p>
+        <p style="margin: 5px 0;"><span style="background-color: red; padding: 3px 10px; color: white;">■</span> Risque élevé (> 50)</p>
+        </div>
+        '''
+        m.get_root().html.add_child(folium.Element(legend_html))
+        
+        st.subheader(title)
+        st.components.v1.html(m._repr_html_(), height=600, scrolling=False)
+    except Exception as e:
+        st.error(f"Carte de risque indisponible : {e}")
+
 def show_time_series(df: pd.DataFrame, title="Séries temporelles (auto)"):
     if px is None:
         st.info("Plotly non disponible, séries temporelles désactivées.")
@@ -436,7 +516,7 @@ def normalize_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-def render_prediction_panel(df: pd.DataFrame, label: str):
+def render_prediction_panel(df: pd.DataFrame, label: str, is_risk_map: bool = False):
     st.markdown("**🟣 Prédiction pour l'année en cours**")
     df = normalize_prediction_columns(df)
 
@@ -460,7 +540,33 @@ def render_prediction_panel(df: pd.DataFrame, label: str):
     
     st.dataframe(df_display, use_container_width=True)
 
-    # KPIs si colonnes présentes
+    # Si carte de risque grippe par régions
+    if is_risk_map:
+        # Chercher colonne région et score de risque
+        region_col = None
+        risk_col = None
+        
+        for col in df.columns:
+            col_lower = col.lower()
+            if "region" in col_lower or col == "Region":
+                region_col = col
+            if "risque" in col_lower or "risk" in col_lower or "score" in col_lower:
+                risk_col = col
+        
+        if region_col and risk_col:
+            show_risk_map_regions(df, region_col, risk_col, "Prédiction risque grippe 2025 par région")
+            
+            # KPIs spécifiques
+            st.markdown("#### 📊 Analyse du risque")
+            cols = st.columns(3, gap="large")
+            risk_values = df[risk_col].dropna()
+            if not risk_values.empty:
+                cols[0].metric("Score moyen", f"{risk_values.mean():.1f}")
+                cols[1].metric("Régions à risque élevé (>50)", len(risk_values[risk_values > 50]))
+                cols[2].metric("Régions à faible risque (<25)", len(risk_values[risk_values < 25]))
+        return
+
+    # KPIs si colonnes présentes (pour autres prédictions)
     cols = st.columns(3, gap="large")
     if "y_pred" in df.columns:
         cols[0].metric("Taux prédit (moy.)", f"{df['y_pred'].mean():.2f}")
@@ -496,7 +602,7 @@ def render_dataset_panel(ds: dict):
 
     # Si dataset de prédiction : UI dédiée, pas de carte
     if ds.get("is_prediction"):
-        render_prediction_panel(raw, label)
+        render_prediction_panel(raw, label, is_risk_map=ds.get("is_risk_map", False))
         return
 
     # Sinon : pipeline normal
